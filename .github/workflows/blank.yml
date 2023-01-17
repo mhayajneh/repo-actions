@@ -1,36 +1,83 @@
-# This is a basic workflow to help you get started with Actions
-
-name: CI
-
-# Controls when the workflow will run
+name: actions
 on:
-  # Triggers the workflow on push or pull request events but only for the "master" branch
   push:
-    branches: [ "master" ]
   pull_request:
-    branches: [ "master" ]
-
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+    tags:
+      - 'version/**'
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  yii:
+    name: yii action
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    env:
+      DB_USERNAME: root
+      DB_PASSWORD: yii
+      TEST_DB_USERNAME: root
+      TEST_DB_PASSWORD: yii
+      DB_CHARSET: utf8
+    services:
+      mysql:
+        image: mysql:latest
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: false
+          MYSQL_ROOT_PASSWORD: yii
+          MYSQL_DATABASE: yii
+        ports:
+          - 3306/tcp
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    strategy:
+      fail-fast: false
+      matrix:
+        php-versions: ['7.4', '8.0']
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+      - name: Set Node.js 10.x
+        uses: actions/setup-node@v1
+        with:
+          node-version: 10.x
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-versions }}
+          extensions: mbstring, intl, gd, imagick, zip, dom, mysql
+          coverage: xdebug
+
+      
+      #- name: Start mysql service
+      #   run: sudo systemctl start mysql.service
+
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache composer dependencies
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress --prefer-dist --optimize-autoloader
+
+      - name: Prepare the application
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          php -r "file_exists('.env') || copy('.env.dist', '.env');"
+          php yii migrate
+          npm install --development
+          npm run build
+        env:
+          DB_DSN: mysql:host=127.0.0.1;port=${{ job.services.mysql.ports['3306'] }};dbname=yii
+          TEST_DB_DSN: mysql:host=127.0.0.1;port=${{ job.services.mysql.ports['3306'] }};dbname=yii
+
+      - name: Run Tests
+        run: |
+          vendor/bin/codecept build
+          php tests/bin/yii app/setup --interactive=0
+          nohup php -S localhost:8080 > yii.log 2>&1 &
+          vendor/bin/codecept run
+        env:
+          DB_DSN: mysql:host=127.0.0.1;port=${{ job.services.mysql.ports['3306'] }};dbname=yii
+          TEST_DB_DSN: mysql:host=127.0.0.1;port=${{ job.services.mysql.ports['3306'] }};dbname=yii
